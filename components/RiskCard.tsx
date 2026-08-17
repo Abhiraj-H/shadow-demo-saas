@@ -128,8 +128,16 @@ export default function RiskCard({
           %
         </span>
 
-        <span>
-          {risk.source.toUpperCase()}
+        <span
+          className={
+            risk.source === "ai"
+              ? "font-semibold text-purple-400"
+              : "text-zinc-500"
+          }
+        >
+          {risk.source === "ai"
+            ? "✦ GEMINI AI"
+            : "STATIC"}
         </span>
       </div>
     </article>

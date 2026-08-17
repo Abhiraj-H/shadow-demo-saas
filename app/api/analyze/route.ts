@@ -43,7 +43,7 @@ import {
 } from "@/lib/analysis/deterministicRules";
 
 import {
-  runAIAnalysis,
+  enrichRisksWithAI,
 } from "@/lib/analysis/aiAnalyzer";
 
 import {
@@ -172,39 +172,27 @@ export async function POST(
         affectedNodes,
       });
 
-    let aiRisks: import("@/lib/analysis/riskScore").RiskCandidate[] = [];
+    let risks = [...staticRisks];
 
     if (process.env.GEMINI_API_KEY) {
-      const aiClient =
-        createGeminiRiskClient();
-
-      aiRisks =
-        await runAIAnalysis(
+      const aiClient = createGeminiRiskClient();
+      try {
+        risks = await enrichRisksWithAI(
+          staticRisks,
           {
-            changes:
-              changes.changedSymbols,
-
+            changes: changes.changedSymbols,
             graph,
-
-            repository:
-              parsedRepository,
-
+            repository: parsedRepository,
             affectedNodes,
-
-            maxContexts: 6,
           },
-
           aiClient
         );
+      } catch (err) {
+        console.error("AI risk enrichment failed:", err);
+      }
     }
 
-    const risks =
-      rankRisks(
-        dedupeRisks([
-          ...staticRisks,
-          ...aiRisks,
-        ])
-      );
+    risks = rankRisks(dedupeRisks(risks));
 
     const blastRadiusScore =
       calculateBlastRadiusScore(

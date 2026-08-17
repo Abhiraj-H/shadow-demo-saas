@@ -1,5 +1,3 @@
-// lib/ai/client.ts
-
 import { GoogleGenAI } from "@google/genai";
 
 import type {
@@ -11,6 +9,8 @@ import type {
 import {
   SHADOW_SYSTEM_PROMPT,
   buildRiskPrompt,
+  SHADOW_ENRICHMENT_SYSTEM_PROMPT,
+  buildEnrichmentPrompt,
 } from "./prompts";
 
 interface ModelOutput {
@@ -24,68 +24,167 @@ function extractJSON(text: string): ModelOutput {
     .replace(/```$/i, "")
     .trim();
 
-  const parsed = JSON.parse(cleaned);
+  try {
+    const parsed = JSON.parse(cleaned);
 
-  return {
-    risks: Array.isArray(parsed.risks)
-      ? parsed.risks
-      : [],
-  };
+    return {
+      risks: Array.isArray(parsed.risks)
+        ? parsed.risks
+        : [],
+    };
+  } catch {
+    return { risks: [] };
+  }
 }
+
+const MODELS = [
+  "gemini-3.6-flash",
+  "gemini-3.5-flash",
+  "gemini-2.5-flash",
+];
 
 export function createGeminiRiskClient(): LLMRiskClient {
   const apiKey = process.env.GEMINI_API_KEY;
 
   if (!apiKey) {
-    throw new Error(
-      "GEMINI_API_KEY is missing"
-    );
+    throw new Error("GEMINI_API_KEY is missing");
   }
 
-  const ai = new GoogleGenAI({
-    apiKey,
-  });
+  const ai = new GoogleGenAI({ apiKey });
 
   return {
-    async analyzeRisk(
-      context: RiskAnalysisContext
-    ): Promise<AIRiskResponse[]> {
-      const response =
-        await ai.models.generateContent({
-          model:
-            process.env.GEMINI_MODEL ??
-            "gemini-3.6-flash",
+    async analyzeRisk(context) {
+      let lastError: unknown;
 
-          contents: [
-            {
-              role: "user",
-              parts: [
+      for (const model of MODELS) {
+        try {
+          console.log(`[Shadow AI] Trying ${model}`);
+
+          const response =
+            await ai.models.generateContent({
+              model,
+
+              contents: [
                 {
-                  text: `
+                  role: "user",
+                  parts: [
+                    {
+                      text: `
 ${SHADOW_SYSTEM_PROMPT}
 
 ${buildRiskPrompt(context)}
 `,
+                    },
+                  ],
                 },
               ],
-            },
-          ],
 
-          config: {
-            temperature: 0.1,
+              config: {
+                temperature: 0.1,
+                responseMimeType:
+                  "application/json",
+              },
+            });
 
-            responseMimeType:
-              "application/json",
-          },
-        });
+          const text = response.text;
 
-      const text = response.text;
+          if (!text) {
+            continue;
+          }
 
-      if (!text) {
-        return [];
+          console.log(
+            `[Shadow AI] ✓ ${model}`
+          );
+
+          return extractJSON(text).risks;
+        } catch (error) {
+          console.error(
+            `[Shadow AI] ${model} failed`,
+            error
+          );
+
+          lastError = error;
+        }
       }
 
-      return extractJSON(text).risks;
+      console.error(
+        "[Shadow AI] All Gemini models unavailable",
+        lastError
+      );
+
+      return [];
+    },
+
+    async enrichRisks(staticRisks: any[], context: any): Promise<any[]> {
+      let lastError: unknown;
+
+      for (const model of MODELS) {
+        try {
+          console.log(`[Shadow AI] Trying enrichment with ${model}`);
+
+          const response =
+            await ai.models.generateContent({
+              model,
+
+              contents: [
+                {
+                  role: "user",
+                  parts: [
+                    {
+                      text: `
+${SHADOW_ENRICHMENT_SYSTEM_PROMPT}
+
+${buildEnrichmentPrompt(staticRisks, context)}
+`,
+                    },
+                  ],
+                },
+              ],
+
+              config: {
+                temperature: 0.1,
+                responseMimeType:
+                  "application/json",
+              },
+            });
+
+          const text = response.text;
+
+          if (!text) {
+            continue;
+          }
+
+          console.log(
+            `[Shadow AI] ✓ Enrichment with ${model}`
+          );
+
+          const cleaned = text
+            .replace(/^```json\s*/i, "")
+            .replace(/^```\s*/i, "")
+            .replace(/```$/i, "")
+            .trim();
+
+          const parsed = JSON.parse(cleaned);
+
+          return Array.isArray(parsed.enrichedRisks)
+            ? parsed.enrichedRisks
+            : [];
+        } catch (error) {
+          console.error(
+            `[Shadow AI] ${model} enrichment failed`,
+            error
+          );
+
+          lastError = error;
+        }
+      }
+
+      console.error(
+        "[Shadow AI] All Gemini models unavailable for enrichment",
+        lastError
+      );
+
+      return [];
     },
   };
 }

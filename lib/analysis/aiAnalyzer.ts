@@ -54,10 +54,23 @@ export interface AIRiskResponse {
   affectedNodeId?: string;
 }
 
+export interface EnrichedRiskResponse {
+  id: string;
+  description: string;
+  suggestedFix: string;
+  severity: RiskSeverity;
+  confidence: number;
+}
+
 export interface LLMRiskClient {
   analyzeRisk(
     context: RiskAnalysisContext
   ): Promise<AIRiskResponse[]>;
+
+  enrichRisks(
+    staticRisks: RiskCandidate[],
+    context: any
+  ): Promise<EnrichedRiskResponse[]>;
 }
 
 export interface RiskAnalysisContext {
@@ -399,10 +412,24 @@ export async function runAIAnalysis(
     }
 
     try {
+      console.log(
+        "\n========== GEMINI INPUT =========="
+      );
+      console.log(
+        JSON.stringify(context, null, 2)
+      );
+
       const response =
         await client.analyzeRisk(
           context
         );
+
+      console.log(
+        "\n========== GEMINI OUTPUT =========="
+      );
+      console.log(
+        JSON.stringify(response, null, 2)
+      );
 
       const converted = response.map(
         (risk, index) =>
@@ -415,6 +442,9 @@ export async function runAIAnalysis(
 
       risks.push(...converted);
     } catch (error) {
+      console.error(
+        "\n========== GEMINI ERROR =========="
+      );
       console.error(
         `AI analysis failed for ${change.name}:`,
         error
@@ -433,4 +463,60 @@ export function createAIContext(
     change,
     input
   );
+}
+
+export async function enrichRisksWithAI(
+  staticRisks: RiskCandidate[],
+  input: AIAnalyzerInput,
+  client: LLMRiskClient
+): Promise<RiskCandidate[]> {
+  if (staticRisks.length === 0) {
+    return [];
+  }
+
+  const relevantAffected = (input.affectedNodes || []).slice(0, 15);
+  const affectedComponents = relevantAffected.map((item) => {
+    const parsed = findParsedSymbol(input.repository, item.node.id);
+    return {
+      nodeId: item.node.id,
+      name: item.node.name,
+      type: item.node.type,
+      filePath: item.node.filePath,
+      code: parsed?.code,
+    };
+  });
+
+  const context = {
+    changes: input.changes.map((c) => ({
+      name: c.name,
+      type: c.type,
+      changeType: c.changeType,
+      before: c.before,
+      after: c.after,
+    })),
+    affectedComponents,
+  };
+
+  try {
+    const enriched = await client.enrichRisks(staticRisks, context);
+    const enrichedMap = new Map(enriched.map((item) => [item.id, item]));
+
+    return staticRisks.map((risk) => {
+      const enrichment = enrichedMap.get(risk.id);
+      if (enrichment) {
+        return {
+          ...risk,
+          description: enrichment.description,
+          suggestedFix: enrichment.suggestedFix || risk.suggestedFix,
+          severity: enrichment.severity || risk.severity,
+          confidence: enrichment.confidence || risk.confidence,
+          source: "ai" as const,
+        };
+      }
+      return risk;
+    });
+  } catch (error) {
+    console.error("AI risk enrichment failed:", error);
+    return staticRisks;
+  }
 }

@@ -82,3 +82,51 @@ ${JSON.stringify(
 Find only concrete regressions supported by the evidence.
 `.trim();
 }
+
+export const SHADOW_ENRICHMENT_SYSTEM_PROMPT = `
+You are Shadow, a software change-risk analysis engine.
+
+Your job is to enrich static code analysis findings with product-focused impact explanations and actionable suggested fixes.
+
+For each detected risk, you receive:
+1. The static risk details (title, path, static evidence).
+2. The context of the code changes.
+3. The source code of the affected components.
+
+Please output a JSON list of enriched risk details. For each risk, explain clearly how the change propagates and breaks the system (e.g. "This breaks phone-only account creation because...").
+
+Return JSON only.
+
+Schema:
+{
+  "enrichedRisks": [
+    {
+      "id": "the original static risk id",
+      "description": "Clear explanation of product impact (e.g., how the null/type change propagates and crashes/breaks the flow)",
+      "suggestedFix": "Detailed, actionable fix instructions",
+      "severity": "critical | high | medium | low",
+      "confidence": 0.0
+    }
+  ]
+}
+`.trim();
+
+export function buildEnrichmentPrompt(
+  staticRisks: any[],
+  context: any
+): string {
+  return `
+Analyze these static code analysis findings and enrich them with business logic / product impact explanations.
+
+STATIC RISKS DETECTED:
+${JSON.stringify(staticRisks, null, 2)}
+
+CODE CHANGES:
+${JSON.stringify(context.changes, null, 2)}
+
+AFFECTED COMPONENT CODES:
+${JSON.stringify(context.affectedComponents, null, 2)}
+
+Provide enriched descriptions and fixes for these risks.
+`.trim();
+}
