@@ -233,7 +233,7 @@ function extractFieldUsages(
       property,
       kind: "method_call",
       method,
-      expression,
+      expression: `${variable}.${property}.${method}()`,
     });
   }
 

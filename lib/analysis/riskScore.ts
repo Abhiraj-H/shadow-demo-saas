@@ -149,7 +149,7 @@ export function scoreRisk(risk: RiskCandidate): ScoredRisk {
   return {
     ...risk,
     confidence,
-    score: Math.round(clamp(rawScore, 0, 100)),
+    score: Math.round(clamp(rawScore, 0, 98)),
   };
 }
 
@@ -239,7 +239,7 @@ export function calculateBlastRadiusScore(
   const volumeBonus = Math.min(risks.length * 1.5, 10);
 
   return Math.round(
-    clamp(weighted + volumeBonus, 0, 100)
+    clamp(weighted + volumeBonus, 0, 98)
   );
 }
 

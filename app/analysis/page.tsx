@@ -6,7 +6,7 @@ import {
   useEffect,
   useState,
 } from "react";
-
+import SimulationPanel from "@/components/SimulationPanel";
 import AnalysisSummary from "@/components/AnalysisSummary";
 import RiskCard from "@/components/RiskCard";
 import CodeDiff from "@/components/CodeDiff";
@@ -217,6 +217,12 @@ export default function AnalysisPage() {
         <AnalysisSummary
           {...data.summary}
         />
+
+        <section className="mt-10">
+          <SimulationPanel
+            risks={data.risks}
+          />
+        </section>
 
         <section className="mt-10">
           <div className="mb-4">

@@ -10,17 +10,15 @@ export default function Home() {
           </div>
 
           <h1 className="text-5xl font-semibold tracking-tight sm:text-7xl">
-            Know what breaks
+            See what your code change breaks
             <br />
-            before you merge.
+            <span className="text-transparent bg-clip-text bg-gradient-to-r from-zinc-400 to-zinc-600">
+              before you merge it.
+            </span>
           </h1>
 
-          <p className="mt-6 max-w-2xl text-lg leading-8 text-zinc-400">
-            Shadow analyzes your pull
-            request, maps its blast
-            radius, and predicts hidden
-            regressions before they reach
-            production.
+          <p className="mt-8 max-w-2xl text-lg leading-8 text-zinc-400">
+            Shadow analyzes your pull request, maps its true blast radius, and predicts hidden regressions before they reach production.
           </p>
 
           <form
