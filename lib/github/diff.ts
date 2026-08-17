@@ -1,31 +1,48 @@
 // lib/github/diff.ts
 
-import {
-  githubFetchText,
-  type GitHubRepo,
-} from "./client";
+import { execFile } from "child_process";
+import { promisify } from "util";
+import type { ClonedRepo } from "./client";
+
+const execFileAsync = promisify(execFile);
 
 export async function fetchCompareDiff(
-  repository: GitHubRepo,
+  clonedRepo: ClonedRepo,
   base: string,
   head: string
 ): Promise<string> {
-  return githubFetchText(
-    `/repos/${repository.owner}/${repository.repo}/compare/${encodeURIComponent(
-      base
-    )}...${encodeURIComponent(head)}`,
+  const localPath = clonedRepo.localPath;
 
-    "application/vnd.github.v3.diff"
-  );
-}
+  try {
+    const { stdout } = await execFileAsync(
+      "git",
+      ["diff", `origin/${base}...origin/${head}`],
+      {
+        cwd: localPath,
+        maxBuffer: 20 * 1024 * 1024,
+      }
+    );
 
-export async function fetchPullRequestDiff(
-  repository: GitHubRepo,
-  pullNumber: number
-): Promise<string> {
-  return githubFetchText(
-    `/repos/${repository.owner}/${repository.repo}/pulls/${pullNumber}`,
+    if (stdout && stdout.trim().length > 0) {
+      return stdout;
+    }
+  } catch {
+    // Fallback to local branches if origin refs aren't prefixed
+  }
 
-    "application/vnd.github.v3.diff"
-  );
+  try {
+    const { stdout } = await execFileAsync(
+      "git",
+      ["diff", `${base}...${head}`],
+      {
+        cwd: localPath,
+        maxBuffer: 20 * 1024 * 1024,
+      }
+    );
+
+    return stdout || "";
+  } catch (error) {
+    console.error("Git diff failed:", error);
+    return "";
+  }
 }

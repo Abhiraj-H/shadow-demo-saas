@@ -1,40 +1,17 @@
 // lib/github/repository.ts
 
-import {
-  githubFetch,
-  type GitHubRepo,
-} from "./client";
+import fs from "fs/promises";
+import path from "path";
+import { execFile } from "child_process";
+import { promisify } from "util";
+import type { ClonedRepo } from "./client";
+
+const execFileAsync = promisify(execFile);
 
 export interface RepositoryFile {
   path: string;
   content: string;
-  sha: string;
-  size: number;
-}
-
-interface CommitResponse {
-  commit: {
-    tree: {
-      sha: string;
-    };
-  };
-}
-
-interface TreeResponse {
-  tree: Array<{
-    path: string;
-    type: "blob" | "tree";
-    sha: string;
-    size?: number;
-  }>;
-
-  truncated: boolean;
-}
-
-interface ContentResponse {
-  content?: string;
-  encoding?: string;
-  sha: string;
+  sha?: string;
   size: number;
 }
 
@@ -46,130 +23,84 @@ const supportedExtensions = [
   ".prisma",
 ];
 
-function supported(path: string): boolean {
-  return supportedExtensions.some(
-    (extension) =>
-      path.endsWith(extension)
-  );
+function isSupported(filePath: string): boolean {
+  return supportedExtensions.some((ext) => filePath.endsWith(ext));
 }
 
-function ignored(path: string): boolean {
+function isIgnored(filePath: string): boolean {
   return [
-    "node_modules/",
-    ".next/",
-    "dist/",
-    "build/",
-    "coverage/",
-    "vendor/",
-  ].some((value) =>
-    path.includes(value)
+    ".git",
+    "node_modules",
+    ".next",
+    "dist",
+    "build",
+    "coverage",
+    "vendor",
+    ".turbo",
+    ".cache",
+  ].some((ignored) =>
+    filePath.split("/").includes(ignored) ||
+    filePath.split("\\").includes(ignored)
   );
 }
 
-async function resolveTreeSha(
-  repository: GitHubRepo,
-  ref: string
-): Promise<string> {
-  const commit =
-    await githubFetch<CommitResponse>(
-      `/repos/${repository.owner}/${repository.repo}/commits/${encodeURIComponent(
-        ref
-      )}`
-    );
+async function collectFiles(
+  dir: string,
+  baseDir: string
+): Promise<string[]> {
+  const entries = await fs.readdir(dir, { withFileTypes: true });
+  const results: string[] = [];
 
-  return commit.commit.tree.sha;
-}
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    const relPath = path.relative(baseDir, fullPath).replace(/\\/g, "/");
 
-async function fetchFile(
-  repository: GitHubRepo,
-  path: string,
-  ref: string
-): Promise<RepositoryFile | null> {
-  const result =
-    await githubFetch<ContentResponse>(
-      `/repos/${repository.owner}/${repository.repo}/contents/${encodeURI(
-        path
-      )}?ref=${encodeURIComponent(ref)}`
-    );
+    if (isIgnored(relPath)) {
+      continue;
+    }
 
-  if (
-    !result.content ||
-    result.encoding !== "base64"
-  ) {
-    return null;
-  }
-
-  return {
-    path,
-    content: Buffer.from(
-      result.content.replace(/\n/g, ""),
-      "base64"
-    ).toString("utf8"),
-
-    sha: result.sha,
-    size: result.size,
-  };
-}
-
-export async function fetchRepositoryFiles(
-  repository: GitHubRepo,
-  ref: string,
-  maxFiles = 150
-): Promise<RepositoryFile[]> {
-  const treeSha =
-    await resolveTreeSha(
-      repository,
-      ref
-    );
-
-  const tree =
-    await githubFetch<TreeResponse>(
-      `/repos/${repository.owner}/${repository.repo}/git/trees/${treeSha}?recursive=1`
-    );
-
-  const blobs = tree.tree
-    .filter(
-      (item) =>
-        item.type === "blob" &&
-        supported(item.path) &&
-        !ignored(item.path) &&
-        (item.size ?? 0) <
-          250_000
-    )
-    .slice(0, maxFiles);
-
-  const results: RepositoryFile[] = [];
-
-  const concurrency = 8;
-
-  for (
-    let i = 0;
-    i < blobs.length;
-    i += concurrency
-  ) {
-    const batch =
-      blobs.slice(
-        i,
-        i + concurrency
-      );
-
-    const files =
-      await Promise.all(
-        batch.map((item) =>
-          fetchFile(
-            repository,
-            item.path,
-            ref
-          )
-        )
-      );
-
-    for (const file of files) {
-      if (file) {
-        results.push(file);
-      }
+    if (entry.isDirectory()) {
+      const nested = await collectFiles(fullPath, baseDir);
+      results.push(...nested);
+    } else if (entry.isFile() && isSupported(entry.name)) {
+      results.push(relPath);
     }
   }
 
   return results;
+}
+
+export async function fetchRepositoryFiles(
+  clonedRepo: ClonedRepo,
+  ref: string
+): Promise<RepositoryFile[]> {
+  const localPath = clonedRepo.localPath;
+
+  try {
+    await execFileAsync("git", ["checkout", "-f", `origin/${ref}`], {
+      cwd: localPath,
+    }).catch(async () => {
+      await execFileAsync("git", ["checkout", "-f", ref], {
+        cwd: localPath,
+      });
+    });
+  } catch (err) {
+    console.warn(`Could not checkout ${ref}:`, err);
+  }
+
+  const relativePaths = await collectFiles(localPath, localPath);
+  const files: RepositoryFile[] = [];
+
+  for (const relPath of relativePaths) {
+    const fullPath = path.join(localPath, relPath);
+    const content = await fs.readFile(fullPath, "utf-8");
+
+    files.push({
+      path: relPath,
+      content,
+      size: Buffer.byteLength(content, "utf-8"),
+    });
+  }
+
+  return files;
 }

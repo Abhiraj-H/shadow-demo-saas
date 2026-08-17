@@ -1,31 +1,23 @@
 // lib/github/client.ts
 
+import { execFile } from "child_process";
+import { promisify } from "util";
+import path from "path";
+import os from "os";
+import fs from "fs/promises";
+
+const execFileAsync = promisify(execFile);
+
 export interface GitHubRepo {
   owner: string;
   repo: string;
 }
 
-const API =
-  "https://api.github.com";
-
-function headers(
-  accept = "application/vnd.github+json"
-): HeadersInit {
-  const token =
-    process.env.GITHUB_TOKEN;
-
-  return {
-    Accept: accept,
-    "X-GitHub-Api-Version":
-      "2022-11-28",
-
-    ...(token
-      ? {
-          Authorization:
-            `Bearer ${token}`,
-        }
-      : {}),
-  };
+export interface ClonedRepo {
+  url: string;
+  owner: string;
+  repo: string;
+  localPath: string;
 }
 
 export function parseGitHubRepo(
@@ -56,54 +48,60 @@ export function parseGitHubRepo(
     };
   }
 
-  throw new Error(
-    "Invalid GitHub repository URL"
-  );
+  const parts = value.split("/").filter(Boolean);
+  return {
+    owner: parts[parts.length - 2] || "repo",
+    repo: parts[parts.length - 1] || "repo",
+  };
 }
 
-export async function githubFetch<T>(
-  endpoint: string
-): Promise<T> {
-  const response = await fetch(
-    `${API}${endpoint}`,
-    {
-      headers: headers(),
-      cache: "no-store",
-    }
-  );
+export async function cloneOrFetchRepo(
+  repoUrl: string
+): Promise<ClonedRepo> {
+  const url = repoUrl.trim();
+  const parsed = parseGitHubRepo(url);
 
-  if (!response.ok) {
-    const text =
-      await response.text();
+  const normalizedUrl = url.startsWith("http")
+    ? url
+    : `https://github.com/${parsed.owner}/${parsed.repo}.git`;
 
-    throw new Error(
-      `GitHub API ${response.status}: ${text}`
-    );
+  const cacheBase = path.join(os.tmpdir(), "shadow-repos");
+  await fs.mkdir(cacheBase, { recursive: true });
+
+  const safeDirName = `${parsed.owner}_${parsed.repo}`.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const localPath = path.join(cacheBase, safeDirName);
+
+  let exists = false;
+  try {
+    const stat = await fs.stat(path.join(localPath, ".git"));
+    exists = stat.isDirectory();
+  } catch {
+    exists = false;
   }
 
-  return response.json() as Promise<T>;
-}
-
-export async function githubFetchText(
-  endpoint: string,
-  accept: string
-): Promise<string> {
-  const response = await fetch(
-    `${API}${endpoint}`,
-    {
-      headers: headers(accept),
-      cache: "no-store",
+  if (!exists) {
+    await fs.rm(localPath, { recursive: true, force: true });
+    await execFileAsync("git", ["clone", normalizedUrl, localPath], {
+      maxBuffer: 20 * 1024 * 1024,
+    });
+  } else {
+    try {
+      await execFileAsync("git", ["fetch", "--all", "--prune"], {
+        cwd: localPath,
+        maxBuffer: 20 * 1024 * 1024,
+      });
+    } catch {
+      await fs.rm(localPath, { recursive: true, force: true });
+      await execFileAsync("git", ["clone", normalizedUrl, localPath], {
+        maxBuffer: 20 * 1024 * 1024,
+      });
     }
-  );
-
-  if (!response.ok) {
-    const text =
-      await response.text();
-
-    throw new Error(
-      `GitHub API ${response.status}: ${text}`
-    );
   }
 
-  return response.text();
+  return {
+    url: normalizedUrl,
+    owner: parsed.owner,
+    repo: parsed.repo,
+    localPath,
+  };
 }

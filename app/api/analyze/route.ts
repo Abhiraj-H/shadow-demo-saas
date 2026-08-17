@@ -3,7 +3,7 @@
 import { NextResponse } from "next/server";
 
 import {
-  parseGitHubRepo,
+  cloneOrFetchRepo,
 } from "@/lib/github/client";
 
 import {
@@ -91,7 +91,7 @@ export async function POST(
       body.head?.trim() || "HEAD";
 
     const repository =
-      parseGitHubRepo(body.repoUrl);
+      await cloneOrFetchRepo(body.repoUrl);
 
     const files =
       await fetchRepositoryFiles(
