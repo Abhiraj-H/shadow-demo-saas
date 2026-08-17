@@ -1,0 +1,32 @@
+// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Repository {
+  id        String   @id @default(cuid())
+  owner     String
+  name      String
+  url       String
+  createdAt DateTime @default(now())
+  analyses  Analysis[]
+}
+
+model Analysis {
+  id               String   @id @default(cuid())
+  baseRef          String
+  headRef          String
+  blastRadiusScore Int
+  riskCount        Int
+  result           Json
+  createdAt        DateTime @default(now())
+
+  repositoryId String
+  repository   Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+}
