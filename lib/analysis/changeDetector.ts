@@ -439,18 +439,26 @@ function detectPrismaFieldChanges(
   );
 
   for (const field of fields) {
+    // Extract the short field name (e.g. "email" from "User.email")
+    const shortName =
+      field.name.split(".").pop() ?? field.name;
+
     const removedLines: DiffLine[] = [];
     const addedLines: DiffLine[] = [];
 
     for (const hunk of file.hunks) {
       for (const line of hunk.lines) {
+        // Content must mention the actual field name to avoid
+        // false positives from line-number shifting in diffs
+        const contentMentionsField =
+          new RegExp(`\\b${shortName}\\b`).test(line.content);
+
+        if (!contentMentionsField) continue;
+
         if (
           line.type === "removed" &&
           line.oldLine !== undefined &&
-          lineInsideSymbol(
-            field,
-            line.oldLine
-          )
+          lineInsideSymbol(field, line.oldLine)
         ) {
           removedLines.push(line);
         }
@@ -458,10 +466,7 @@ function detectPrismaFieldChanges(
         if (
           line.type === "added" &&
           line.newLine !== undefined &&
-          lineInsideSymbol(
-            field,
-            line.newLine
-          )
+          lineInsideSymbol(field, line.newLine)
         ) {
           addedLines.push(line);
         }
