@@ -12,9 +12,7 @@ import type {
 
 export interface DiffLine {
   type: "context" | "added" | "removed";
-
   content: string;
-
   oldLine?: number;
   newLine?: number;
 }
@@ -22,25 +20,27 @@ export interface DiffLine {
 export interface DiffHunk {
   oldStart: number;
   oldCount: number;
-
   newStart: number;
   newCount: number;
-
   lines: DiffLine[];
 }
 
 export interface ChangedFile {
   oldPath: string;
   newPath: string;
-
   status: "added" | "modified" | "deleted" | "renamed";
-
   hunks: DiffHunk[];
 }
 
 export interface ChangeDetectionResult {
   files: ChangedFile[];
   changedSymbols: ChangedSymbol[];
+}
+
+export function canonicalFieldId(
+  fieldName: string
+): string {
+  return `field:${fieldName}`;
 }
 
 function cleanGitPath(path: string): string {
@@ -50,19 +50,12 @@ function cleanGitPath(path: string): string {
     .trim();
 }
 
-function parseHunkHeader(line: string): {
-  oldStart: number;
-  oldCount: number;
-  newStart: number;
-  newCount: number;
-} | null {
+function parseHunkHeader(line: string) {
   const match = line.match(
     /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/
   );
 
-  if (!match) {
-    return null;
-  }
+  if (!match) return null;
 
   return {
     oldStart: Number(match[1]),
@@ -103,13 +96,10 @@ export function parseUnifiedDiff(
       };
 
       currentHunk = null;
-
       continue;
     }
 
-    if (!currentFile) {
-      continue;
-    }
+    if (!currentFile) continue;
 
     if (line.startsWith("new file mode")) {
       currentFile.status = "added";
@@ -160,9 +150,7 @@ export function parseUnifiedDiff(
     if (line.startsWith("@@")) {
       const header = parseHunkHeader(line);
 
-      if (!header) {
-        continue;
-      }
+      if (!header) continue;
 
       currentHunk = {
         ...header,
@@ -177,31 +165,33 @@ export function parseUnifiedDiff(
       continue;
     }
 
-    if (!currentHunk) {
-      continue;
-    }
+    if (!currentHunk) continue;
 
-    if (line.startsWith("+") && !line.startsWith("+++")) {
+    if (
+      line.startsWith("+") &&
+      !line.startsWith("+++")
+    ) {
       currentHunk.lines.push({
         type: "added",
         content: line.slice(1),
         newLine,
       });
 
-      newLine += 1;
-
+      newLine++;
       continue;
     }
 
-    if (line.startsWith("-") && !line.startsWith("---")) {
+    if (
+      line.startsWith("-") &&
+      !line.startsWith("---")
+    ) {
       currentHunk.lines.push({
         type: "removed",
         content: line.slice(1),
         oldLine,
       });
 
-      oldLine += 1;
-
+      oldLine++;
       continue;
     }
 
@@ -218,8 +208,8 @@ export function parseUnifiedDiff(
       newLine,
     });
 
-    oldLine += 1;
-    newLine += 1;
+    oldLine++;
+    newLine++;
   }
 
   if (currentFile) {
@@ -229,7 +219,25 @@ export function parseUnifiedDiff(
   return files;
 }
 
-function symbolTouchesLine(
+function normalizePath(value: string) {
+  return value
+    .replace(/\\/g, "/")
+    .replace(/^\.\//, "");
+}
+
+function getSymbolsForFile(
+  repository: ParsedRepository,
+  filePath: string
+): ParsedSymbol[] {
+  const normalized = normalizePath(filePath);
+
+  return repository.symbols.filter(
+    (symbol) =>
+      normalizePath(symbol.filePath) === normalized
+  );
+}
+
+function lineInsideSymbol(
   symbol: ParsedSymbol,
   line: number
 ): boolean {
@@ -247,113 +255,371 @@ function symbolTouchesLine(
 }
 
 function detectChangeType(
-  symbol: ParsedSymbol,
-  addedLines: string[],
-  removedLines: string[],
-  fileStatus: ChangedFile["status"]
+  before: string,
+  after: string
 ): ChangedSymbol["changeType"] {
-  if (fileStatus === "added") {
-    return "added";
-  }
-
-  if (fileStatus === "deleted") {
-    return "deleted";
-  }
-
-  const before = removedLines.join("\n");
-  const after = addedLines.join("\n");
-
-  const looksLikeSignature =
-    symbol.type === "function" ||
-    symbol.type === "class" ||
-    symbol.type === "interface" ||
-    symbol.type === "type";
+  if (!before && after) return "added";
+  if (before && !after) return "deleted";
 
   if (
-    looksLikeSignature &&
-    before &&
-    after &&
-    before !== after
+    before !== after &&
+    (
+      before.includes(":") ||
+      after.includes(":") ||
+      before.includes("String") ||
+      after.includes("String") ||
+      before.includes("?") ||
+      after.includes("?") ||
+      before.includes("|") ||
+      after.includes("|")
+    )
   ) {
-    const signaturePattern =
-      /\b(function|class|interface|type|async|export|const|let|var)\b|\([^)]*\)\s*(?::[^=({]+)?/;
-
-    if (
-      signaturePattern.test(before) ||
-      signaturePattern.test(after)
-    ) {
-      return "signature_changed";
-    }
-  }
-
-  const typeIndicators = [
-    "string",
-    "number",
-    "boolean",
-    "null",
-    "undefined",
-    "?",
-    "|",
-    "String",
-    "Int",
-    "Boolean",
-    "DateTime",
-  ];
-
-  const typeChanged = typeIndicators.some(
-    (indicator) =>
-      before.includes(indicator) !==
-      after.includes(indicator)
-  );
-
-  if (typeChanged) {
     return "type_changed";
   }
 
   return "modified";
 }
 
-function findSymbolsForFile(
-  repository: ParsedRepository,
-  filePath: string
-): ParsedSymbol[] {
-  return repository.symbols.filter(
-    (symbol) =>
-      symbol.filePath === filePath ||
-      symbol.filePath.replace(/^\.\//, "") ===
-        filePath.replace(/^\.\//, "")
-  );
-}
+function parseTypeScriptProperty(
+  line: string
+): {
+  name: string;
+  type: string;
+} | null {
+  const cleaned = line.trim();
 
-function createFallbackFileChange(
-  file: ChangedFile
-): ChangedSymbol {
-  const path =
-    file.status === "deleted"
-      ? file.oldPath
-      : file.newPath;
+  const match = cleaned.match(
+    /^(?:readonly\s+)?([A-Za-z_$][\w$]*)(\?)?\s*:\s*([^;]+);?$/
+  );
+
+  if (!match) return null;
 
   return {
-    nodeId: `${path}:file:${path}`,
-    name: path,
-    type: "file",
-    filePath: path,
-    changeType:
-      file.status === "added"
-        ? "added"
-        : file.status === "deleted"
-          ? "deleted"
-          : "modified",
+    name: match[1],
+    type:
+      `${match[2] ? "?" : ""}${match[3].trim()}`,
   };
+}
+
+function findEnclosingType(
+  symbols: ParsedSymbol[],
+  lineNumber: number
+): ParsedSymbol | undefined {
+  return symbols
+    .filter(
+      (symbol) =>
+        (
+          symbol.type === "interface" ||
+          symbol.type === "type"
+        ) &&
+        lineInsideSymbol(
+          symbol,
+          lineNumber
+        )
+    )
+    .sort((a, b) => {
+      const aSize =
+        (a.endLine ?? 0) -
+        (a.startLine ?? 0);
+
+      const bSize =
+        (b.endLine ?? 0) -
+        (b.startLine ?? 0);
+
+      return aSize - bSize;
+    })[0];
+}
+
+function detectTypeScriptFieldChanges(
+  file: ChangedFile,
+  symbols: ParsedSymbol[]
+): ChangedSymbol[] {
+  const changes: ChangedSymbol[] = [];
+
+  for (const hunk of file.hunks) {
+    const removed =
+      hunk.lines.filter(
+        (line) => line.type === "removed"
+      );
+
+    const added =
+      hunk.lines.filter(
+        (line) => line.type === "added"
+      );
+
+    for (const removedLine of removed) {
+      const beforeProperty =
+        parseTypeScriptProperty(
+          removedLine.content
+        );
+
+      if (!beforeProperty) continue;
+
+      const matchingAdded =
+        added.find((candidate) => {
+          const property =
+            parseTypeScriptProperty(
+              candidate.content
+            );
+
+          return (
+            property?.name ===
+            beforeProperty.name
+          );
+        });
+
+      if (!matchingAdded) continue;
+
+      const afterProperty =
+        parseTypeScriptProperty(
+          matchingAdded.content
+        );
+
+      if (!afterProperty) continue;
+
+      const sourceLine =
+        removedLine.oldLine ??
+        matchingAdded.newLine;
+
+      if (sourceLine === undefined) {
+        continue;
+      }
+
+      const parent =
+        findEnclosingType(
+          symbols,
+          sourceLine
+        );
+
+      if (!parent) continue;
+
+      const fullName =
+        `${parent.name}.${beforeProperty.name}`;
+
+      changes.push({
+        nodeId:
+          canonicalFieldId(
+            fullName
+          ),
+
+        name: fullName,
+
+        type: "type",
+
+        filePath:
+          parent.filePath,
+
+        changeType:
+          detectChangeType(
+            removedLine.content,
+            matchingAdded.content
+          ),
+
+        before:
+          removedLine.content.trim(),
+
+        after:
+          matchingAdded.content.trim(),
+      });
+    }
+  }
+
+  return changes;
+}
+
+function detectPrismaFieldChanges(
+  file: ChangedFile,
+  symbols: ParsedSymbol[]
+): ChangedSymbol[] {
+  const changes: ChangedSymbol[] = [];
+
+  const fields = symbols.filter(
+    (symbol) =>
+      symbol.type === "database_field"
+  );
+
+  for (const field of fields) {
+    const removedLines: DiffLine[] = [];
+    const addedLines: DiffLine[] = [];
+
+    for (const hunk of file.hunks) {
+      for (const line of hunk.lines) {
+        if (
+          line.type === "removed" &&
+          line.oldLine !== undefined &&
+          lineInsideSymbol(
+            field,
+            line.oldLine
+          )
+        ) {
+          removedLines.push(line);
+        }
+
+        if (
+          line.type === "added" &&
+          line.newLine !== undefined &&
+          lineInsideSymbol(
+            field,
+            line.newLine
+          )
+        ) {
+          addedLines.push(line);
+        }
+      }
+    }
+
+    if (
+      removedLines.length === 0 &&
+      addedLines.length === 0
+    ) {
+      continue;
+    }
+
+    const before =
+      removedLines
+        .map((line) =>
+          line.content.trim()
+        )
+        .join("\n");
+
+    const after =
+      addedLines
+        .map((line) =>
+          line.content.trim()
+        )
+        .join("\n");
+
+    changes.push({
+      nodeId:
+        canonicalFieldId(
+          field.name
+        ),
+
+      name: field.name,
+
+      type: "database_field",
+
+      filePath:
+        field.filePath,
+
+      changeType:
+        detectChangeType(
+          before,
+          after
+        ),
+
+      before:
+        before || undefined,
+
+      after:
+        after || undefined,
+    });
+  }
+
+  return changes;
+}
+
+function detectNormalSymbolChanges(
+  file: ChangedFile,
+  symbols: ParsedSymbol[]
+): ChangedSymbol[] {
+  const changes: ChangedSymbol[] = [];
+
+  for (const symbol of symbols) {
+    if (
+      symbol.type === "database_model" ||
+      symbol.type === "database_field" ||
+      symbol.type === "interface" ||
+      symbol.type === "type"
+    ) {
+      continue;
+    }
+
+    const removed: string[] = [];
+    const added: string[] = [];
+
+    for (const hunk of file.hunks) {
+      for (const line of hunk.lines) {
+        if (
+          line.type === "removed" &&
+          line.oldLine !== undefined &&
+          lineInsideSymbol(
+            symbol,
+            line.oldLine
+          )
+        ) {
+          removed.push(line.content);
+        }
+
+        if (
+          line.type === "added" &&
+          line.newLine !== undefined &&
+          lineInsideSymbol(
+            symbol,
+            line.newLine
+          )
+        ) {
+          added.push(line.content);
+        }
+      }
+    }
+
+    if (
+      removed.length === 0 &&
+      added.length === 0
+    ) {
+      continue;
+    }
+
+    const before =
+      removed.join("\n");
+
+    const after =
+      added.join("\n");
+
+    changes.push({
+      nodeId: symbol.id,
+      name: symbol.name,
+      type: symbol.type,
+      filePath:
+        symbol.filePath,
+
+      changeType:
+        detectChangeType(
+          before,
+          after
+        ),
+
+      before:
+        before || undefined,
+
+      after:
+        after || undefined,
+    });
+  }
+
+  return changes;
+}
+
+function semanticKey(
+  change: ChangedSymbol
+) {
+  return [
+    change.nodeId,
+    change.filePath,
+    change.before ?? "",
+    change.after ?? "",
+  ].join(":");
 }
 
 export function detectChangedSymbols(
   diff: string,
   repository: ParsedRepository
 ): ChangeDetectionResult {
-  const files = parseUnifiedDiff(diff);
+  const files =
+    parseUnifiedDiff(diff);
 
-  const changedSymbols: ChangedSymbol[] = [];
+  const allChanges: ChangedSymbol[] = [];
 
   for (const file of files) {
     const filePath =
@@ -361,100 +627,57 @@ export function detectChangedSymbols(
         ? file.oldPath
         : file.newPath;
 
-    const symbols = findSymbolsForFile(
-      repository,
-      filePath
+    const symbols =
+      getSymbolsForFile(
+        repository,
+        filePath
+      );
+
+    const prismaChanges =
+      filePath.endsWith(".prisma")
+        ? detectPrismaFieldChanges(
+            file,
+            symbols
+          )
+        : [];
+
+    const tsFieldChanges =
+      /\.(tsx?|jsx?)$/.test(
+        filePath
+      )
+        ? detectTypeScriptFieldChanges(
+            file,
+            symbols
+          )
+        : [];
+
+    const normalChanges =
+      detectNormalSymbolChanges(
+        file,
+        symbols
+      );
+
+    allChanges.push(
+      ...prismaChanges,
+      ...tsFieldChanges,
+      ...normalChanges
     );
-
-    if (symbols.length === 0) {
-      changedSymbols.push(
-        createFallbackFileChange(file)
-      );
-
-      continue;
-    }
-
-    const touched = new Set<string>();
-
-    for (const hunk of file.hunks) {
-      const addedLines = hunk.lines.filter(
-        (line) => line.type === "added"
-      );
-
-      const removedLines = hunk.lines.filter(
-        (line) => line.type === "removed"
-      );
-
-      for (const symbol of symbols) {
-        const symbolAddedLines = addedLines.filter(
-          (line) =>
-            line.newLine !== undefined &&
-            symbolTouchesLine(
-              symbol,
-              line.newLine
-            )
-        );
-
-        const symbolRemovedLines =
-          removedLines.filter(
-            (line) =>
-              line.oldLine !== undefined &&
-              symbolTouchesLine(
-                symbol,
-                line.oldLine
-              )
-          );
-
-        if (
-          symbolAddedLines.length === 0 &&
-          symbolRemovedLines.length === 0
-        ) {
-          continue;
-        }
-
-        if (touched.has(symbol.id)) {
-          continue;
-        }
-
-        touched.add(symbol.id);
-
-        const before = symbolRemovedLines
-          .map((line) => line.content)
-          .join("\n");
-
-        const after = symbolAddedLines
-          .map((line) => line.content)
-          .join("\n");
-
-        changedSymbols.push({
-          nodeId: symbol.id,
-          name: symbol.name,
-          type: symbol.type,
-          filePath: symbol.filePath,
-
-          changeType: detectChangeType(
-            symbol,
-            symbolAddedLines.map(
-              (line) => line.content
-            ),
-            symbolRemovedLines.map(
-              (line) => line.content
-            ),
-            file.status
-          ),
-
-          before: before || undefined,
-          after: after || undefined,
-        });
-      }
-    }
-
-    if (touched.size === 0) {
-      changedSymbols.push(
-        createFallbackFileChange(file)
-      );
-    }
   }
+
+  const seen = new Set<string>();
+
+  const changedSymbols =
+    allChanges.filter((change) => {
+      const key =
+        semanticKey(change);
+
+      if (seen.has(key)) {
+        return false;
+      }
+
+      seen.add(key);
+      return true;
+    });
 
   return {
     files,
@@ -466,19 +689,23 @@ export function filterChangesByType(
   changes: ChangedSymbol[],
   types: NodeType[]
 ): ChangedSymbol[] {
-  return changes.filter((change) =>
-    types.includes(change.type)
+  return changes.filter(
+    (change) =>
+      types.includes(change.type)
   );
 }
 
 export function getHighImpactChanges(
   changes: ChangedSymbol[]
 ): ChangedSymbol[] {
-  return changes.filter((change) =>
-    [
-      "deleted",
-      "signature_changed",
-      "type_changed",
-    ].includes(change.changeType)
+  return changes.filter(
+    (change) =>
+      [
+        "deleted",
+        "signature_changed",
+        "type_changed",
+      ].includes(
+        change.changeType
+      )
   );
 }

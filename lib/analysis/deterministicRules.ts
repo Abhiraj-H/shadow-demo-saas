@@ -3,6 +3,7 @@
 import type {
   ChangedSymbol,
   DependencyGraph,
+  GraphEdge,
   GraphNode,
   GraphTraversalNode,
 } from "@/lib/graph/types";
@@ -15,9 +16,7 @@ import type {
 
 export interface DeterministicAnalysisInput {
   changes: ChangedSymbol[];
-
   graph: DependencyGraph;
-
   affectedNodes?: GraphTraversalNode[];
 }
 
@@ -34,77 +33,410 @@ function createRiskId(
   ].join(":");
 }
 
-function findNode(
-  graph: DependencyGraph,
-  id: string
-): GraphNode | undefined {
-  return graph.nodes.find((node) => node.id === id);
-}
+function normalizeNullableChange(
+  change: ChangedSymbol
+): boolean {
+  const before =
+    change.before ?? "";
 
-function getDependents(
-  graph: DependencyGraph,
-  nodeId: string
-): GraphNode[] {
-  const dependentIds = graph.edges
-    .filter((edge) => edge.target === nodeId)
-    .map((edge) => edge.source);
+  const after =
+    change.after ?? "";
 
-  return graph.nodes.filter((node) =>
-    dependentIds.includes(node.id)
+  const beforeNullable =
+    before.includes("null") ||
+    before.includes("undefined") ||
+    /\w+\?/.test(before) ||
+    /String\?/.test(before);
+
+  const afterNullable =
+    after.includes("null") ||
+    after.includes("undefined") ||
+    /\w+\?/.test(after) ||
+    /String\?/.test(after);
+
+  return (
+    !beforeNullable &&
+    afterNullable
   );
 }
 
-function inferSeverity(
-  change: ChangedSymbol,
-  dependentCount: number
-): RiskSeverity {
-  if (
-    change.changeType === "deleted" &&
-    dependentCount > 0
-  ) {
-    return "critical";
-  }
-
-  if (
-    change.changeType === "signature_changed" &&
-    dependentCount > 0
-  ) {
-    return "high";
-  }
-
-  if (change.changeType === "type_changed") {
-    return dependentCount > 2
-      ? "high"
-      : "medium";
-  }
-
-  return dependentCount > 4
-    ? "medium"
-    : "low";
+function getUsageEdges(
+  graph: DependencyGraph,
+  nodeId: string
+): GraphEdge[] {
+  return graph.edges.filter(
+    (edge) =>
+      edge.target === nodeId &&
+      edge.type ===
+      "uses_field"
+  );
 }
 
-function inferCategory(
-  change: ChangedSymbol
-): RiskCategory {
+function nodeById(
+  graph: DependencyGraph,
+  id: string
+): GraphNode | undefined {
+  return graph.nodes.find(
+    (node) =>
+      node.id === id
+  );
+}
+
+function isDangerousStringMethod(
+  method?: unknown
+): boolean {
   if (
-    change.type === "database_model" ||
-    change.type === "database_field"
+    typeof method !== "string"
   ) {
-    return "database";
+    return false;
   }
 
-  if (change.type === "api_route") {
-    return "api_breaking_change";
-  }
+  return [
+    "trim",
+    "toLowerCase",
+    "toUpperCase",
+    "substring",
+    "slice",
+    "replace",
+    "split",
+    "includes",
+    "startsWith",
+    "endsWith",
+    "charAt",
+    "match",
+  ].includes(method);
+}
+
+function nullableMethodRisk(
+  change: ChangedSymbol,
+  graph: DependencyGraph,
+  edge: GraphEdge
+): RiskCandidate | null {
+  const metadata =
+    edge.metadata ?? {};
 
   if (
-    change.changeType === "signature_changed" ||
-    change.changeType === "type_changed"
+    metadata.usageKind !==
+    "method_call"
   ) {
-    return "type";
+    return null;
   }
 
-  return "dependency";
+  const method =
+    typeof metadata.method ===
+      "string"
+      ? metadata.method
+      : undefined;
+
+  if (
+    !isDangerousStringMethod(
+      method
+    )
+  ) {
+    return null;
+  }
+
+  const affected =
+    nodeById(
+      graph,
+      edge.source
+    );
+
+  if (!affected) {
+    return null;
+  }
+
+  const expression =
+    typeof metadata.expression ===
+      "string"
+      ? metadata.expression
+      : `${change.name}.${method}()`;
+
+  return {
+    id: createRiskId(
+      `nullable-method-${method}`,
+      change.nodeId,
+      affected.id
+    ),
+
+    title:
+      `Possible null dereference in ${affected.name}`,
+
+    description:
+      `${change.name} can now be null, but ${affected.name} calls ${method}() on it. This can throw at runtime.`,
+
+    category: "runtime",
+
+    severity: "critical",
+
+    confidence: 0.99,
+
+    source: "static",
+
+    changedNodeId:
+      change.nodeId,
+
+    affectedNodeId:
+      affected.id,
+
+    changedSymbol:
+      change.name,
+
+    affectedSymbol:
+      affected.name,
+
+    filePath:
+      affected.filePath,
+
+    dependencyDepth: 1,
+
+    failurePath: [
+      change.name,
+      affected.name,
+      expression,
+    ],
+
+    evidence: [
+      `${change.name} changed from required to nullable.`,
+      `${affected.name} executes ${expression}.`,
+      `${method}() cannot safely execute when the value is null.`,
+    ],
+
+    suggestedFix:
+      `Check ${change.name} for null before calling ${method}(), or handle the phone-only user case explicitly.`,
+  };
+}
+
+function nullableArgumentRisk(
+  change: ChangedSymbol,
+  graph: DependencyGraph,
+  edge: GraphEdge
+): RiskCandidate | null {
+  const metadata =
+    edge.metadata ?? {};
+
+  if (
+    metadata.usageKind !==
+    "argument"
+  ) {
+    return null;
+  }
+
+  const affected =
+    nodeById(
+      graph,
+      edge.source
+    );
+
+  if (!affected) {
+    return null;
+  }
+
+  const callee =
+    typeof metadata.callee ===
+      "string"
+      ? metadata.callee
+      : "function";
+
+  const expression =
+    typeof metadata.expression ===
+      "string"
+      ? metadata.expression
+      : `${callee}(${change.name})`;
+
+  return {
+    id: createRiskId(
+      `nullable-argument-${callee}`,
+      change.nodeId,
+      affected.id
+    ),
+
+    title:
+      `Nullable value passed to ${callee}`,
+
+    description:
+      `${affected.name} passes ${change.name} into ${callee} even though the value can now be null.`,
+
+    category: "type",
+
+    severity: "high",
+
+    confidence: 0.94,
+
+    source: "static",
+
+    changedNodeId:
+      change.nodeId,
+
+    affectedNodeId:
+      affected.id,
+
+    changedSymbol:
+      change.name,
+
+    affectedSymbol:
+      affected.name,
+
+    filePath:
+      affected.filePath,
+
+    dependencyDepth: 1,
+
+    failurePath: [
+      change.name,
+      affected.name,
+      callee,
+    ],
+
+    evidence: [
+      `${change.name} changed from required to nullable.`,
+      `${affected.name} contains ${expression}.`,
+    ],
+
+    suggestedFix:
+      `Guard ${change.name} before calling ${callee}, or update ${callee} to explicitly support null values.`,
+  };
+}
+
+function genericNullableUsageRisk(
+  change: ChangedSymbol,
+  graph: DependencyGraph,
+  edge: GraphEdge
+): RiskCandidate | null {
+  const metadata =
+    edge.metadata ?? {};
+
+  if (
+    metadata.usageKind !==
+    "property_access"
+  ) {
+    return null;
+  }
+
+  const affected =
+    nodeById(
+      graph,
+      edge.source
+    );
+
+  if (!affected) {
+    return null;
+  }
+
+  return {
+    id: createRiskId(
+      "nullable-property-access",
+      change.nodeId,
+      affected.id
+    ),
+
+    title:
+      `${affected.name} uses newly nullable ${change.name}`,
+
+    description:
+      `${affected.name} directly consumes ${change.name}, which can now be null.`,
+
+    category:
+      "business_logic",
+
+    severity:
+      "medium",
+
+    confidence: 0.78,
+
+    source: "static",
+
+    changedNodeId:
+      change.nodeId,
+
+    affectedNodeId:
+      affected.id,
+
+    changedSymbol:
+      change.name,
+
+    affectedSymbol:
+      affected.name,
+
+    filePath:
+      affected.filePath,
+
+    dependencyDepth: 1,
+
+    failurePath: [
+      change.name,
+      affected.name,
+    ],
+
+    evidence: [
+      `${change.name} changed from required to nullable.`,
+      `${affected.name} directly references the field.`,
+    ],
+
+    suggestedFix:
+      `Review how ${affected.name} behaves when ${change.name} is null.`,
+  };
+}
+
+function nullableFieldRules(
+  change: ChangedSymbol,
+  graph: DependencyGraph
+): RiskCandidate[] {
+  if (
+    !normalizeNullableChange(
+      change
+    )
+  ) {
+    return [];
+  }
+
+  const edges =
+    getUsageEdges(
+      graph,
+      change.nodeId
+    );
+
+  const results:
+    RiskCandidate[] = [];
+
+  for (const edge of edges) {
+    const methodRisk =
+      nullableMethodRisk(
+        change,
+        graph,
+        edge
+      );
+
+    if (methodRisk) {
+      results.push(methodRisk);
+      continue;
+    }
+
+    const argumentRisk =
+      nullableArgumentRisk(
+        change,
+        graph,
+        edge
+      );
+
+    if (argumentRisk) {
+      results.push(argumentRisk);
+      continue;
+    }
+
+    const genericRisk =
+      genericNullableUsageRisk(
+        change,
+        graph,
+        edge
+      );
+
+    if (genericRisk) {
+      results.push(genericRisk);
+    }
+  }
+
+  return results;
 }
 
 function deletedSymbolRule(
@@ -115,339 +447,193 @@ function deletedSymbolRule(
     return [];
   }
 
-  const dependents = getDependents(
-    graph,
-    change.nodeId
+  const dependents = graph.edges.filter(
+    (edge) => edge.target === change.nodeId
   );
 
-  if (dependents.length === 0) {
-    return [];
+  const results: RiskCandidate[] = [];
+
+  for (const edge of dependents) {
+    const affected = nodeById(graph, edge.source);
+    if (!affected) continue;
+
+    results.push({
+      id: createRiskId(
+        "deleted-symbol",
+        change.nodeId,
+        affected.id
+      ),
+      title: `${affected.name} depends on deleted ${change.name}`,
+      description: `${change.name} was deleted but ${affected.name} still depends on it.`,
+      category: "dependency",
+      severity: "critical",
+      confidence: 0.99,
+      source: "static",
+      changedNodeId: change.nodeId,
+      affectedNodeId: affected.id,
+      changedSymbol: change.name,
+      affectedSymbol: affected.name,
+      filePath: affected.filePath,
+      dependencyDepth: 1,
+      failurePath: [change.name, affected.name],
+      evidence: [
+        `${change.name} was deleted.`,
+        `${affected.name} still has a dependency on it.`,
+      ],
+      suggestedFix: `Update ${affected.name} to remove or replace its dependency on ${change.name}.`,
+    });
   }
 
-  return dependents.map((dependent) => ({
-    id: createRiskId(
-      "deleted-symbol",
-      change.nodeId,
-      dependent.id
-    ),
-
-    title: `${dependent.name} depends on deleted symbol ${change.name}`,
-
-    description:
-      `${change.name} was deleted, but ${dependent.name} still depends on it.`,
-
-    category: "dependency",
-
-    severity: "critical",
-
-    confidence: 0.99,
-
-    source: "static",
-
-    changedNodeId: change.nodeId,
-    affectedNodeId: dependent.id,
-
-    changedSymbol: change.name,
-    affectedSymbol: dependent.name,
-
-    filePath: dependent.filePath,
-
-    dependencyDepth: 1,
-
-    failurePath: [
-      change.name,
-      dependent.name,
-    ],
-
-    evidence: [
-      `${change.name} was deleted.`,
-      `${dependent.name} has a dependency edge to ${change.name}.`,
-    ],
-
-    suggestedFix:
-      `Update ${dependent.name} to remove or replace its dependency on ${change.name}.`,
-  }));
+  return results;
 }
 
 function signatureChangeRule(
   change: ChangedSymbol,
   graph: DependencyGraph
 ): RiskCandidate[] {
-  if (
-    change.changeType !== "signature_changed"
-  ) {
+  if (change.changeType !== "signature_changed") {
     return [];
   }
 
-  const dependents = getDependents(
-    graph,
-    change.nodeId
+  const callers = graph.edges.filter(
+    (edge) => edge.target === change.nodeId && edge.type === "calls"
   );
 
-  return dependents.map((dependent) => ({
-    id: createRiskId(
-      "signature-change",
-      change.nodeId,
-      dependent.id
-    ),
+  const results: RiskCandidate[] = [];
 
-    title: `Potential breaking signature change in ${change.name}`,
+  for (const edge of callers) {
+    const affected = nodeById(graph, edge.source);
+    if (!affected) continue;
 
-    description:
-      `${dependent.name} depends on ${change.name}, whose signature changed.`,
-
-    category: "api_breaking_change",
-
-    severity: "high",
-
-    confidence: 0.93,
-
-    source: "static",
-
-    changedNodeId: change.nodeId,
-    affectedNodeId: dependent.id,
-
-    changedSymbol: change.name,
-    affectedSymbol: dependent.name,
-
-    filePath: dependent.filePath,
-
-    dependencyDepth: 1,
-
-    failurePath: [
-      change.name,
-      dependent.name,
-    ],
-
-    evidence: [
-      `Before: ${change.before ?? "unknown"}`,
-      `After: ${change.after ?? "unknown"}`,
-    ],
-
-    suggestedFix:
-      `Verify the call to ${change.name} inside ${dependent.name} matches the new signature.`,
-  }));
-}
-
-function nullableTypeRule(
-  change: ChangedSymbol,
-  graph: DependencyGraph
-): RiskCandidate[] {
-  if (
-    change.changeType !== "type_changed" &&
-    change.changeType !==
-      "signature_changed"
-  ) {
-    return [];
-  }
-
-  const before = change.before ?? "";
-  const after = change.after ?? "";
-
-  const becameNullable =
-    !before.includes("null") &&
-    !before.includes("undefined") &&
-    !before.includes("?") &&
-    (
-      after.includes("null") ||
-      after.includes("undefined") ||
-      after.includes("?")
-    );
-
-  if (!becameNullable) {
-    return [];
-  }
-
-  const dependents = getDependents(
-    graph,
-    change.nodeId
-  );
-
-  return dependents.map((dependent) => ({
-    id: createRiskId(
-      "nullable-change",
-      change.nodeId,
-      dependent.id
-    ),
-
-    title: `${change.name} can now be null or undefined`,
-
-    description:
-      `${dependent.name} may receive a nullable value after the change to ${change.name}.`,
-
-    category: "runtime",
-
-    severity: "high",
-
-    confidence: 0.9,
-
-    source: "static",
-
-    changedNodeId: change.nodeId,
-    affectedNodeId: dependent.id,
-
-    changedSymbol: change.name,
-    affectedSymbol: dependent.name,
-
-    filePath: dependent.filePath,
-
-    dependencyDepth: 1,
-
-    failurePath: [
-      change.name,
-      dependent.name,
-    ],
-
-    evidence: [
-      `Previous declaration: ${before}`,
-      `New declaration: ${after}`,
-    ],
-
-    suggestedFix:
-      `Add explicit null/undefined handling before ${dependent.name} consumes ${change.name}.`,
-  }));
-}
-
-function databaseChangeRule(
-  change: ChangedSymbol,
-  graph: DependencyGraph
-): RiskCandidate[] {
-  if (
-    change.type !== "database_field" &&
-    change.type !== "database_model"
-  ) {
-    return [];
-  }
-
-  const dependents = getDependents(
-    graph,
-    change.nodeId
-  );
-
-  if (
-    change.changeType === "deleted" ||
-    change.changeType === "type_changed"
-  ) {
-    return dependents.map((dependent) => ({
+    results.push({
       id: createRiskId(
-        "database-change",
+        "signature-change",
         change.nodeId,
-        dependent.id
+        affected.id
       ),
-
-      title: `Database change may break ${dependent.name}`,
-
-      description:
-        `${dependent.name} depends on database entity ${change.name}, which has a breaking schema change.`,
-
-      category: "database",
-
-      severity:
-        change.changeType === "deleted"
-          ? "critical"
-          : "high",
-
-      confidence: 0.95,
-
+      title: `${affected.name} may use an outdated ${change.name} signature`,
+      description: `${change.name}'s function signature changed and ${affected.name} calls it.`,
+      category: "api_breaking_change",
+      severity: "high",
+      confidence: 0.94,
       source: "static",
-
       changedNodeId: change.nodeId,
-      affectedNodeId: dependent.id,
-
+      affectedNodeId: affected.id,
       changedSymbol: change.name,
-      affectedSymbol: dependent.name,
-
-      filePath: dependent.filePath,
-
+      affectedSymbol: affected.name,
+      filePath: affected.filePath,
       dependencyDepth: 1,
-
-      failurePath: [
-        change.name,
-        dependent.name,
-      ],
-
+      failurePath: [change.name, affected.name],
       evidence: [
-        `Database ${change.type} ${change.name} changed.`,
-        `Change type: ${change.changeType}.`,
+        `Before: ${change.before ?? "unknown"}`,
+        `After: ${change.after ?? "unknown"}`,
       ],
-
-      suggestedFix:
-        "Review database migration compatibility and update all dependent queries before deployment.",
-    }));
+      suggestedFix: `Update the call to ${change.name} inside ${affected.name} to match its new signature.`,
+    });
   }
 
-  return [];
+  return results;
 }
 
-function genericBlastRadiusRule(
-  change: ChangedSymbol,
-  graph: DependencyGraph
-): RiskCandidate[] {
-  const dependents = getDependents(
-    graph,
-    change.nodeId
-  );
+function semanticChangeKey(
+  change: ChangedSymbol
+) {
+  return [
+    change.name,
+    change.before ?? "",
+    change.after ?? "",
+  ].join(":");
+}
 
-  if (dependents.length < 3) {
-    return [];
+function dedupeSemanticChanges(
+  changes: ChangedSymbol[]
+): ChangedSymbol[] {
+  const map =
+    new Map<
+      string,
+      ChangedSymbol
+    >();
+
+  for (const change of changes) {
+    const key =
+      semanticChangeKey(
+        change
+      );
+
+    const existing =
+      map.get(key);
+
+    if (!existing) {
+      map.set(key, change);
+      continue;
+    }
+
+    // Prefer Prisma field declaration
+    // as canonical source when both
+    // Prisma + TS type changed.
+    if (
+      change.type ===
+      "database_field" &&
+      existing.type !==
+      "database_field"
+    ) {
+      map.set(key, change);
+    }
   }
 
-  return [
-    {
-      id: createRiskId(
-        "large-blast-radius",
-        change.nodeId
-      ),
+  return Array.from(map.values());
+}
 
-      title: `${change.name} has a large blast radius`,
+function dedupeRisks(
+  risks: RiskCandidate[]
+): RiskCandidate[] {
+  const map =
+    new Map<
+      string,
+      RiskCandidate
+    >();
 
-      description:
-        `${dependents.length} direct components depend on ${change.name}.`,
+  for (const risk of risks) {
+    const key = [
+      risk.category,
+      risk.changedSymbol,
+      risk.affectedSymbol,
+      risk.title,
+    ].join(":");
 
-      category: inferCategory(change),
+    const existing =
+      map.get(key);
 
-      severity: inferSeverity(
-        change,
-        dependents.length
-      ),
+    if (
+      !existing ||
+      risk.confidence >
+      existing.confidence
+    ) {
+      map.set(key, risk);
+    }
+  }
 
-      confidence: 0.86,
-
-      source: "static",
-
-      changedNodeId: change.nodeId,
-
-      changedSymbol: change.name,
-
-      filePath: change.filePath,
-
-      dependencyDepth: 1,
-
-      failurePath: [change.name],
-
-      evidence: [
-        `${dependents.length} direct dependencies were discovered.`,
-        ...dependents
-          .slice(0, 5)
-          .map(
-            (node) =>
-              `${node.name} depends on ${change.name}`
-          ),
-      ],
-
-      suggestedFix:
-        `Review all direct consumers of ${change.name} and add regression tests for the affected paths.`,
-    },
-  ];
+  return Array.from(map.values());
 }
 
 export function runDeterministicRules(
   input: DeterministicAnalysisInput
 ): RiskCandidate[] {
-  const risks: RiskCandidate[] = [];
+  const changes =
+    dedupeSemanticChanges(
+      input.changes
+    );
 
-  for (const change of input.changes) {
+  const risks:
+    RiskCandidate[] = [];
+
+  for (const change of changes) {
     risks.push(
+      ...nullableFieldRules(
+        change,
+        input.graph
+      ),
+
       ...deletedSymbolRule(
         change,
         input.graph
@@ -456,38 +642,41 @@ export function runDeterministicRules(
       ...signatureChangeRule(
         change,
         input.graph
-      ),
-
-      ...nullableTypeRule(
-        change,
-        input.graph
-      ),
-
-      ...databaseChangeRule(
-        change,
-        input.graph
-      ),
-
-      ...genericBlastRadiusRule(
-        change,
-        input.graph
       )
     );
   }
 
-  return risks;
+  return dedupeRisks(risks);
 }
 
 export function findDirectDependents(
   graph: DependencyGraph,
   nodeId: string
 ): GraphNode[] {
-  return getDependents(graph, nodeId);
+  const ids =
+    graph.edges
+      .filter(
+        (edge) =>
+          edge.target ===
+          nodeId
+      )
+      .map(
+        (edge) =>
+          edge.source
+      );
+
+  return graph.nodes.filter(
+    (node) =>
+      ids.includes(node.id)
+  );
 }
 
 export function getChangedNode(
   graph: DependencyGraph,
   change: ChangedSymbol
 ): GraphNode | undefined {
-  return findNode(graph, change.nodeId);
+  return nodeById(
+    graph,
+    change.nodeId
+  );
 }
