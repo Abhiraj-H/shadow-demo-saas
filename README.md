@@ -1,55 +1,59 @@
-# Shadow: See what your code change breaks before you merge it.
+# Shadow
 
-## 💥 The Problem
-Modern SaaS applications are complex webs of interconnected code. You might make a seemingly harmless change in a type definition or database schema—like making an email field optional to support phone-number-first signups—and unknowingly break a downstream billing worker, welcome email job, or password reset flow. 
+*See what your code changes break before you merge.*
 
-Standard CI/CD tools won't save you:
-- **Unit tests** only catch what you explicitly wrote tests for.
-- **Type checkers (TypeScript)** only catch static type mismatches.
-- **Linters** only catch syntax issues.
+Shadow is a developer tool that analyzes pull requests to predict downstream runtime regressions. By tracing data flow starting from your modified code, Shadow maps the exact blast radius of a change—such as turning a required schema field into an optional one—and flags potential crashes (like null pointer dereferences) in billing workers, email jobs, or background tasks before they hit production.
 
-By the time a hidden regression reaches production, it's too late.
+---
 
-## 🔮 The Solution
-**Shadow** is an AI-powered code analysis engine that simulates the true "blast radius" of your pull requests. 
+## Why Shadow?
 
-Instead of waiting for code to break in staging (or worse, production), Shadow intercepts the diff, builds an abstract syntax dependency graph, and walks the execution paths to show you exactly which downstream consumers will fail.
+Modern codebases are highly interconnected. A simple schema update or type modification (e.g., making `User.email` optional to support phone-number-first onboarding) compiles fine, but can silently break runtime logic in downstream consumers that assume the field is always present. 
 
-### How it works
-Shadow employs a unique **Hybrid Analysis Architecture**:
-1. **Deterministic Dependency Graph**: Shadow natively clones the Git repository, fetches the PR branch, and uses a custom static analysis engine to build a deterministic graph of all variables, methods, properties, and API routes. It traces data flow from the changed lines all the way down to the deepest consumers.
-2. **AI Enrichment**: Once the true affected nodes are mathematically proven by the static engine, Shadow passes the isolated context to **Google Gemini**. Gemini analyzes the failure paths and generates human-readable, product-focused explanations of *why* the code will break.
+Standard CI tools miss this:
+- **TypeScript / Linters** check type alignment but won't flag logical issues if default fallback logic is missing.
+- **Unit Tests** only cover scenarios developers explicitly wrote tests for.
 
-This hybrid approach ensures **zero hallucinations**. Gemini isn't guessing what files changed—it's enriching mathematical certainty.
+Shadow traces the actual data flow from the changed code down to the execution endpoints, uncovering issues before merging.
 
-## 🚀 Key Features
-- **Git-Native Diffing**: Shadow works directly with Git, bypassing GitHub API rate limits.
-- **Blast Radius Mapping**: Visually trace the execution path of a regression from origin to failure.
-- **Execution Simulation**: Watch an animated "Simulate PR" sequence that walks through exactly how a runtime null-dereference or logic bug will occur.
-- **Graceful Degradation**: If the AI model hits quota limits, the system instantly falls back to the deterministic engine without breaking the UI.
+---
 
-## 🛠 Built With
-- Next.js (App Router)
-- React
-- Google Gemini API (gemini-3.6-flash / gemini-pro)
-- Tailwind CSS
-- Node.js native Git operations
+## How It Works
 
-## 🏃‍♂️ Run it Locally
+Shadow implements a Git-first hybrid analysis engine:
+
+1. **Deterministic AST Graph**:
+   Shadow clones the repository locally, compares the base and head branches, and identifies changed code blocks. It builds a syntax-level reference graph tracing variables, method calls, properties, and API routes to find all downstream consumers of the modified symbols.
+
+2. **AI-Enriched Findings**:
+   Once the static engine identifies the affected execution paths, the context is passed to Gemini. The model analyzes the flow to provide a concise explanation of the runtime impact and a suggested fix.
+
+3. **Graceful Fallback**:
+   If the Gemini API is unavailable or hits quota limits, the tool falls back entirely to the static engine, returning the type and execution path violations without interrupting the UI.
+
+---
+
+## Getting Started
+
+### Prerequisites
+
+Ensure you have Git and Node.js installed locally.
+
+### Installation
 
 1. Clone the repository and install dependencies:
-```bash
-npm install
-```
+   ```bash
+   npm install
+   ```
 
-2. Add your Gemini API key to `.env.local`:
-```
-GEMINI_API_KEY=your_key_here
-```
+2. Create a `.env.local` file in the root directory:
+   ```env
+   GEMINI_API_KEY=your_gemini_api_key_here
+   ```
 
-3. Start the dev server:
-```bash
-npm run dev
-```
+3. Run the development server:
+   ```bash
+   npm run dev
+   ```
 
-4. Open `http://localhost:3000`. Shadow is pre-configured to analyze a demo SaaS repository. Just click **Analyze Change →** and watch the simulation!
+4. Open `http://localhost:3000` in your browser. The default demo is pre-configured to analyze the changes between `main` and `feature/phone-only-users` in a sample SaaS repository.
