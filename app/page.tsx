@@ -39,13 +39,13 @@ export default function Home() {
 
             <div className="mt-4 grid grid-cols-2 gap-3">
               <div>
-                <label className="text-sm text-zinc-400">
+                <label className="text-sm text-zinc-500">
                   Base
                 </label>
 
                 <input
                   name="base"
-                  defaultValue="main"
+                  defaultValue="demo-main"
                   className="mt-2 w-full rounded-xl border border-white/10 bg-black px-4 py-3 text-sm outline-none"
                 />
               </div>
